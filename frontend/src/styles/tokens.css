@@ -1,0 +1,56 @@
+:root {
+  /* Background — palette calda */
+  --bg:        #FAF6EF;
+  --surface:   #F2E9D8;
+  --surface2:  #EADDc6;
+  --surface3:  #DDD0B5;
+
+  /* Bordi */
+  --border:    rgba(160, 105, 55, 0.15);
+  --border-hi: rgba(160, 105, 55, 0.35);
+
+  /* Accenti */
+  --accent:    #D97757;   /* terracotta — accento primario             */
+  --solar:     #E08C1A;   /* oro solare — kWh, metriche energetiche   */
+  --teal:      #B85C35;   /* terracotta scuro — accento secondario     */
+  --red:       #C94030;   /* rosso caldo — errori / alert              */
+  --violet:    #8B5E3C;   /* rame — accento terziario                  */
+
+  /* Testo — invertito: scuro su chiaro */
+  --text:      #1A120A;
+  --text2:     #7A6648;
+  --text3:     #B09870;
+
+  /* Glass — card chiare semitrasparenti */
+  --glass:     rgba(250, 246, 239, 0.88);
+  --glass-hi:  rgba(242, 235, 217, 0.97);
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  font-family: 'Outfit', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#root {
+  height: 100%;
+}
+
+/* GPU-accelerated flash cards */
+.flash-card {
+  contain: style;
+  will-change: transform;
+}
+
+/* Depth interaction: siblings scale down when one card is hovered */
+.floating-card {
+  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              width 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              background 0.25s,
+              border-color 0.25s,
+              box-shadow 0.3s;
+}

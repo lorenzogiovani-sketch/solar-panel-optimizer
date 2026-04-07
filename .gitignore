@@ -1,0 +1,72 @@
+# ─── Dependencies ──────────────────────────────────
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# ─── Build outputs ─────────────────────────────────
+dist/
+build/
+*.egg-info/
+
+# ─── IDE ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── Environment ───────────────────────────────────
+.env
+.env.local
+.env.production
+
+# ─── OS ────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Docker ────────────────────────────────────────
+docker-compose.override.yml
+
+# ─── Logs ──────────────────────────────────────────
+*.log
+logs/
+
+# ─── Test / Coverage ──────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ─── Uploads temporanei ───────────────────────────
+uploads/
+temp/
+
+# ─── File binari e asset ─────────────────────────
+*.pdf
+data_pannelli/
+Strada-del-Priorato-*/
+/logo*.png
+/Screenshot*.png
+/cube.obj
+
+# ─── Database ────────────────────────────────────
+data/*.db
+
+# ─── Tool AI config ─────────────────────────────
+.agents/
+.agent/
+.claude/
+
+# ─── Internal dev notes ─────────────────────────
+CLAUDE.md
+docs/CRITICAL_ISSUES.md
+docs/CRITICAL_IUSSES_2.md
+docs/PVGIS_VALIDATION.md
+backend/scripts/
+
+# ─── GitHub templates ───────────────────────────
+.github/

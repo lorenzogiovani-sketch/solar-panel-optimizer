@@ -1,0 +1,47 @@
+SolarOptimizer3D — Source Available License
+
+Copyright (c) 2024-2026 SolarOptimizer. All Rights Reserved.
+
+Permission is hereby granted to any person obtaining a copy of this
+software and associated documentation files (the "Software"), to use
+the Software for personal, educational, and evaluation purposes only.
+
+The following restrictions apply:
+
+1. You may NOT modify, adapt, or create derivative works of the Software.
+2. You may NOT redistribute, sublicense, or sell copies of the Software.
+3. You may NOT use the Software for commercial purposes without prior
+   written permission from the copyright holder.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+DISCLAIMER — LIMITATION OF LIABILITY FOR CALCULATIONS
+
+This software produces estimates based on simplified mathematical models
+(pvlib solar position, Perez irradiance, NOCT thermal model, geometric
+ray-casting) and third-party open source libraries. The results — including
+but not limited to solar irradiance, energy production, shadow analysis,
+electrical string sizing, inverter compatibility, and economic analysis —
+are approximations and NOT certified engineering calculations.
+
+The authors and contributors:
+(a) Make NO warranty regarding the accuracy, completeness, or reliability
+    of any calculation or simulation output;
+(b) Accept NO liability for direct, indirect, incidental, or consequential
+    damages arising from the use of these results for the design,
+    installation, evaluation, or operation of real photovoltaic systems;
+(c) Accept NO liability for errors or inaccuracies in third-party libraries
+    (pvlib, trimesh, scipy, embreex, reportlab, etc.) on which this
+    software depends.
+
+Users MUST verify all results with a qualified professional engineer before
+making any design, installation, or financial decision based on this
+software's output.
