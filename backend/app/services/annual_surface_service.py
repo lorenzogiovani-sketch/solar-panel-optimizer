@@ -1,6 +1,16 @@
 """
 Servizio per il calcolo della superficie annuale potenza × ore × giorni.
 Itera su 365 giorni × 24 ore riutilizzando la logica di solar_service.py.
+
+Step 10 — aggregazione energy-weighted (Eq. 4.46, UNI/TS 11300-1):
+Questo servizio calcola F_s(t) istantaneamente per ogni ora e lo moltiplica
+per la POA(t) all'interno del loop orario. L'integrale su 8760 ore di
+`power_actual(t) = power_ideal(t) · F_s(t)` è già, per costruzione, una
+sintesi pesata energeticamente: equivale a usare
+`annual_shading_pct_energy_weighted` di ShadowResponse al posto della media
+temporale `annual_shading_pct_time_avg`. Non viene quindi consumato alcun
+aggregato pre-calcolato da shadow_service: la correttezza energetica è
+garantita dalla pipeline oraria stessa.
 """
 import time as _time
 import math

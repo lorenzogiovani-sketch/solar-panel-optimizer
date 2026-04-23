@@ -32,7 +32,7 @@ export const OBSTACLE_DEFAULTS = {
   antenna:  { type: 'antenna',  labelKey: 'obstacles.antenna',           placement: 'roof',   dimensions: [0.3, 3, 0.3] },
   box:      { type: 'box',      labelKey: 'obstacles.box',               placement: 'roof',   dimensions: [1, 1.5, 1] },
   cylinder: { type: 'cylinder', labelKey: 'obstacles.cylinder',          placement: 'roof',   dimensions: [1, 1.5, 1] },
-  tree:     { type: 'tree',     labelKey: 'obstacles.tree',              placement: 'ground', dimensions: [0.3, 10, 0.3], trunkHeight: 4, canopyRadius: 3, treeShape: 'cone', foliageType: 'deciduous', transmissivity: [0.80, 0.80, 0.65, 0.40, 0.15, 0.10, 0.10, 0.10, 0.15, 0.40, 0.70, 0.80] },
+  tree:     { type: 'tree',     labelKey: 'obstacles.tree',              placement: 'ground', dimensions: [0.3, 10, 0.3], trunkHeight: 4, canopyRadius: 3, treeShape: 'cone', foliageType: 'deciduous', foliage_type: 'deciduous', transmissivity: [0.80, 0.80, 0.65, 0.40, 0.15, 0.10, 0.10, 0.10, 0.15, 0.40, 0.70, 0.80] },
   building: { type: 'building', labelKey: 'obstacles.adjacent_building', placement: 'ground', dimensions: [4, 8, 4] },
 };
 

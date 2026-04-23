@@ -8,6 +8,10 @@ import time as _time
 import calendar
 from app.models.shadow import ShadowRequest, ShadowResponse
 from app.core.config import settings
+from app.services.vegetation import (
+    resolve_monthly_transmissivity,
+    resolve_tree_category,
+)
 from datetime import datetime, timedelta
 from shapely.geometry import Polygon as ShapelyPolygon, Point as ShapelyPoint
 from shapely.ops import unary_union
@@ -101,6 +105,9 @@ def generate_parametric_mesh(building_geom):
 
     return box
 
+# Default storici (pre-Tab. 6.2). Mantenuti per retrocompatibilità: il frontend
+# legacy può ancora inviare il campo `transmissivity` con questi valori e
+# resolve_monthly_transmissivity lo rispetta come override.
 DEFAULT_TRANSMISSIVITY_DECIDUOUS = [0.80, 0.80, 0.65, 0.40, 0.15, 0.10, 0.10, 0.10, 0.15, 0.40, 0.70, 0.80]
 DEFAULT_TRANSMISSIVITY_EVERGREEN = [0.18, 0.18, 0.18, 0.18, 0.15, 0.15, 0.15, 0.15, 0.18, 0.18, 0.18, 0.18]
 
@@ -259,13 +266,32 @@ def create_scene(building_geom, obstacles, model_offset_y=0.0):
                 canopy.apply_translation([pos[0], pos[1], pos[2]])
                 scene.add_geometry(trunk)
 
-                foliage_type = obs.get('foliageType', 'deciduous')
-                transmissivity = obs.get('transmissivity',
-                    DEFAULT_TRANSMISSIVITY_EVERGREEN if foliage_type == 'evergreen' else DEFAULT_TRANSMISSIVITY_DECIDUOUS)
+                # Foliage: accetta sia camelCase (legacy frontend) sia snake_case (nuovo schema)
+                foliage_type = obs.get('foliage_type', obs.get('foliageType', 'deciduous'))
+                if foliage_type not in ('deciduous', 'evergreen'):
+                    foliage_type = 'deciduous'
+
+                # Override esplicito (precedenza): monthly_transmissivity_override > transmissivity legacy > Tab. 6.2
+                override = obs.get('monthly_transmissivity_override')
+                if override is None:
+                    legacy = obs.get('transmissivity')
+                    if isinstance(legacy, (list, tuple)) and len(legacy) == 12:
+                        override = legacy
+
+                # Famiglia canonica (attualmente non altera la geometria: mantenuta la
+                # mesh scelta in base alla forma UI, come richiesto).
+                tree_category = resolve_tree_category(tree_shape, obs.get('tree_category'))
+
+                transmissivity = resolve_monthly_transmissivity(
+                    shape=tree_shape,
+                    foliage_type=foliage_type,
+                    override=override,
+                )
 
                 canopy_meshes.append({
                     'mesh': canopy,
                     'transmissivity': transmissivity,
+                    'tree_category': tree_category,
                 })
             elif obs_type in ('cylinder', 'antenna'):
                 radius = dims[0] / 2 if obs_type == 'cylinder' else 0.05
@@ -538,18 +564,24 @@ def compute_sky_view_factor(roof_points, face_normals, ray_mesh, n_points_hint=N
 def _solpos_to_vectors(solpos):
     """
     Converte posizioni solari pvlib in vettori direttore (Y-up, verso il sole).
-    Coordinate system: -Z = North (azimuth 0°), +X = East (azimuth 90°), +Y = Up
+    Coordinate system: -Z = North (azimuth 0°), +X = East (azimuth 90°), +Y = Up.
+    Applica la correzione di rifrazione Bennett (Eq. 1.13–1.14) sull'elevazione geometrica.
     """
     daylight = solpos[solpos['apparent_elevation'] > 5]
     if daylight.empty:
         return np.empty((0, 3))
 
-    azimuth_rad = np.radians(daylight['azimuth'])
-    elevation_rad = np.radians(daylight['apparent_elevation'])
+    azimuth_rad = np.radians(daylight['azimuth'].values)
+    beta_deg = daylight['elevation'].values  # elevazione geometrica (senza rifrazione pvlib)
 
-    x = np.cos(elevation_rad) * np.sin(azimuth_rad)
-    y = np.sin(elevation_rad)
-    z = -np.cos(elevation_rad) * np.cos(azimuth_rad)  # Negated for -Z = North
+    # Correzione rifrazione atmosferica Bennett vettorizzata, Δβ in arcminuti
+    # Filtro garantisce beta > ~4.95°, quindi beta+4.4 > 9.4 — nessun rischio di divisione per zero
+    delta_arcmin = 1.0 / np.tan(np.radians(beta_deg + 7.31 / (beta_deg + 4.4)))
+    beta_corr_rad = np.radians(beta_deg + delta_arcmin / 60.0)
+
+    x = np.cos(beta_corr_rad) * np.sin(azimuth_rad)
+    y = np.sin(beta_corr_rad)
+    z = -np.cos(beta_corr_rad) * np.cos(azimuth_rad)  # Negated for -Z = North
 
     return np.column_stack([x, y, z])
 
@@ -689,6 +721,97 @@ def _batch_intersects(mesh, origins, directions, chunk_size=None):
             ray_directions=directions[i:end]
         )
     return result
+
+
+def _aggregate_cell_shading(pt_idx, sun_idx, all_cos, contribution,
+                             month_indices, n_points,
+                             diffuse_factor,
+                             direct_fraction=0.65, diffuse_fraction=0.35):
+    """
+    Calcola F_s,m per-cella in due forme: energy-weighted e time-avg (Step 10, Eq. 4.46).
+
+    - F_s,b(r) = 1 - att(r) con att(r) = contribution[r]/all_cos[r] ∈ [0,1]
+    - F_s,d(p) = 1 - diffuse_factor[p] (time-invariant)
+    - F_s,m_energy[p] = direct·(Σ_r∈p F_s,b·I_b / Σ_r∈p I_b) + diffuse·F_s,d[p]
+      con I_b(r) ∝ all_cos[r] (proxy clear-sky a DNI costante)
+    - F_s,m_time[p]   = direct·(1/|R_p|)·Σ_r∈p F_s,b(r)       + diffuse·F_s,d[p]
+
+    Restituisce dict con chiavi:
+      per_cell_energy (n_points,), per_cell_time (n_points,),
+      monthly_energy dict[int]->scalar, monthly_time dict[int]->scalar,
+      annual_energy scalar, annual_time scalar.
+    """
+    out = {
+        'per_cell_energy': np.zeros(n_points),
+        'per_cell_time': np.zeros(n_points),
+        'monthly_energy': {},
+        'monthly_time': {},
+        'annual_energy': 0.0,
+        'annual_time': 0.0,
+    }
+
+    f_s_d = 1.0 - np.clip(diffuse_factor, 0.0, 1.0)
+
+    if len(pt_idx) == 0 or np.sum(all_cos) < 1e-12:
+        # Nessun raggio front-facing: solo diffuso.
+        out['per_cell_energy'] = diffuse_fraction * f_s_d
+        out['per_cell_time'] = diffuse_fraction * f_s_d
+        val = float(np.mean(out['per_cell_energy'])) if n_points > 0 else 0.0
+        out['annual_energy'] = val
+        out['annual_time'] = val
+        return out
+
+    safe_cos = np.where(all_cos > 1e-12, all_cos, 1e-12)
+    att_ray = np.clip(contribution / safe_cos, 0.0, 1.0)
+    f_s_b_ray = 1.0 - att_ray  # shading beam per-ray ∈ [0,1]
+
+    def _aggregate(mask_rays):
+        """Aggrega per-cella energy/time su una maschera di raggi."""
+        if mask_rays is None:
+            r_pt = pt_idx
+            r_cos = all_cos
+            r_fs = f_s_b_ray
+        else:
+            if not np.any(mask_rays):
+                return None, None
+            r_pt = pt_idx[mask_rays]
+            r_cos = all_cos[mask_rays]
+            r_fs = f_s_b_ray[mask_rays]
+
+        # Energy-weighted per-cella: Σ(F_s·cos) / Σ(cos)
+        num_e = np.bincount(r_pt, weights=r_fs * r_cos, minlength=n_points)
+        den_e = np.bincount(r_pt, weights=r_cos, minlength=n_points)
+        fs_b_energy = np.where(den_e > 1e-12, num_e / np.maximum(den_e, 1e-12), 0.0)
+
+        # Time-average per-cella: media aritmetica su raggi front-facing
+        num_t = np.bincount(r_pt, weights=r_fs, minlength=n_points)
+        cnt_t = np.bincount(r_pt, minlength=n_points).astype(float)
+        fs_b_time = np.where(cnt_t > 0, num_t / np.maximum(cnt_t, 1.0), 0.0)
+
+        cell_energy = direct_fraction * fs_b_energy + diffuse_fraction * f_s_d
+        cell_time   = direct_fraction * fs_b_time   + diffuse_fraction * f_s_d
+        return cell_energy, cell_time
+
+    cell_e, cell_t = _aggregate(None)
+    if cell_e is None:
+        cell_e = diffuse_fraction * f_s_d
+        cell_t = diffuse_fraction * f_s_d
+    out['per_cell_energy'] = np.clip(cell_e, 0.0, 1.0)
+    out['per_cell_time'] = np.clip(cell_t, 0.0, 1.0)
+    out['annual_energy'] = float(np.mean(out['per_cell_energy'])) if n_points > 0 else 0.0
+    out['annual_time'] = float(np.mean(out['per_cell_time'])) if n_points > 0 else 0.0
+
+    # Mensile: per ogni mese presente nei raggi
+    ray_months = month_indices[sun_idx]
+    for m in range(1, 13):
+        mask = ray_months == m
+        cell_e_m, cell_t_m = _aggregate(mask)
+        if cell_e_m is None:
+            continue
+        out['monthly_energy'][m] = float(np.mean(np.clip(cell_e_m, 0.0, 1.0)))
+        out['monthly_time'][m] = float(np.mean(np.clip(cell_t_m, 0.0, 1.0)))
+
+    return out
 
 
 def filter_obstacles_by_sun(obstacle_meshes, grid_center, sun_direction, max_distance=50.0):
@@ -903,6 +1026,10 @@ def calculate_shadow_map(request: ShadowRequest) -> ShadowResponse:
 
     # Irradianza accumulata per punto
     irradiance_accum = np.zeros(N_points)
+    # Contribution per-ray (cos_θ·att) — sempre definito anche senza raggi o canopy,
+    # serve al calcolo degli aggregati F_s,m energy-weighted/time-avg (Step 10).
+    contribution = np.zeros(total_rays)
+    all_cos = np.zeros(0)
 
     if total_rays > 0:
         all_origins = start_points[pt_idx]
@@ -943,7 +1070,6 @@ def calculate_shadow_map(request: ShadowRequest) -> ShadowResponse:
                         ray_trans = trans_arr[check_months - 1]
                         attenuation[hit] *= ray_trans[hit]
 
-                contribution = np.zeros(total_rays)
                 contribution[canopy_check] = all_cos[canopy_check] * attenuation
                 np.add.at(irradiance_accum, pt_idx, contribution)
         else:
@@ -956,10 +1082,42 @@ def calculate_shadow_map(request: ShadowRequest) -> ShadowResponse:
 
     _t_rays_done = _time.perf_counter()
 
-    # 4b. Sky View Factor (SVF) — radiazione diffusa (usa mesh edificio decimato, no ostacoli)
-    svf = compute_sky_view_factor(roof_points, face_normals, svf_mesh)
+    # 4b. Fattore diffuso F_s,d: isotropo (SVF) o anisotropo Brunger-Hooper
+    sky_model = getattr(request, 'sky_model', 'isotropic') or 'isotropic'
+    if sky_model == 'brunger_hooper':
+        from app.services.sky_diffuse import (
+            compute_diffuse_shading_factor, compute_surface_obstruction_factors,
+        )
+        k_d = getattr(request, 'diffuse_fraction_kd', 0.35)
+        logger.info(
+            f"[shadow] Sky model = 'brunger_hooper' (K_d={k_d:.2f}): "
+            f"calcolo F_s,d anisotropo — può richiedere più tempo del modello isotropo"
+        )
+        diffuse_factor = compute_diffuse_shading_factor(
+            cell_points=roof_points,
+            cell_normals=face_normals,
+            ray_mesh=svf_mesh,
+            sun_vectors=sun_vectors,
+            K_d=k_d,
+        )
+        # By-product Step 8: F_s,th (cielo oscurato) e F_s,rh (terreno oscurato)
+        # per-cella, alimentano il modello riflesso di Eq. 4.2 in solar_service.
+        f_s_th, f_s_rh = compute_surface_obstruction_factors(
+            cell_points=roof_points,
+            cell_normals=face_normals,
+            ray_mesh=svf_mesh,
+        )
+        logger.info(
+            f"[shadow] Eq. 4.2 factors: F_s,th mean={f_s_th.mean():.3f} "
+            f"F_s,rh mean={f_s_rh.mean():.3f}"
+        )
+    else:
+        diffuse_factor = compute_sky_view_factor(roof_points, face_normals, svf_mesh)
     _t_svf = _time.perf_counter()
-    logger.info(f"[shadow] SVF: {_t_svf - _t_rays_done:.2f}s (mesh faces: {len(svf_mesh.faces)})")
+    logger.info(
+        f"[shadow] diffuse ({sky_model}): {_t_svf - _t_rays_done:.2f}s "
+        f"(mesh faces: {len(svf_mesh.faces)})"
+    )
 
     # 5. Normalizzazione con riferimento ASSOLUTO e composizione diretta + diffusa
     horizontal_ref = np.sum(np.maximum(sun_vectors[:, 1], 0.0))
@@ -970,10 +1128,23 @@ def calculate_shadow_map(request: ShadowRequest) -> ShadowResponse:
 
     DIRECT_FRACTION = 0.65
     DIFFUSE_FRACTION = 0.35
-    irradiance_normalized = DIRECT_FRACTION * direct_normalized + DIFFUSE_FRACTION * svf
+    irradiance_normalized = DIRECT_FRACTION * direct_normalized + DIFFUSE_FRACTION * diffuse_factor
     irradiance_normalized = np.clip(irradiance_normalized, 0.0, 1.0)
 
     shadow_fraction = 1.0 - irradiance_normalized
+
+    # 5b. Aggregati F_s,m energy-weighted vs time-avg (Step 10, Eq. 4.46 / UNI/TS 11300-1)
+    agg = _aggregate_cell_shading(
+        pt_idx, sun_idx, all_cos, contribution,
+        month_indices, N_points,
+        diffuse_factor,
+        direct_fraction=DIRECT_FRACTION, diffuse_fraction=DIFFUSE_FRACTION,
+    )
+    delta_annual = agg['annual_energy'] - agg['annual_time']
+    logger.info(
+        f"[shadow] Step 10 F_s,m annual: energy-weighted={agg['annual_energy']*100:.2f}% "
+        f"time-avg={agg['annual_time']*100:.2f}% δ={delta_annual*100:+.2f}pp"
+    )
 
     # Mappa back to grid
     if polygon_mask is not None:
@@ -996,6 +1167,12 @@ def calculate_shadow_map(request: ShadowRequest) -> ShadowResponse:
         f"rays={total_rays} elapsed={elapsed:.2f}s"
     )
 
+    # Conversione aggregati Step 10 in percentuali per il contratto REST
+    annual_energy_pct = float(agg['annual_energy'] * 100.0)
+    annual_time_pct = float(agg['annual_time'] * 100.0)
+    monthly_energy_pct = {str(m): float(v * 100.0) for m, v in agg['monthly_energy'].items()}
+    monthly_time_pct = {str(m): float(v * 100.0) for m, v in agg['monthly_time'].items()}
+
     return ShadowResponse(
         shadow_grid=final_grid_reshaped.tolist(),
         grid_bounds={
@@ -1008,4 +1185,10 @@ def calculate_shadow_map(request: ShadowRequest) -> ShadowResponse:
         monthly_shadows={"Year": float(avg_shadow)},
         statistics={"free_area_pct": float(free_area_pct)},
         computation_time_s=round(elapsed, 2),
+        annual_shading_pct=annual_energy_pct,
+        annual_shading_pct_energy_weighted=annual_energy_pct,
+        annual_shading_pct_time_avg=annual_time_pct,
+        monthly_shading_pct=monthly_energy_pct,
+        monthly_shading_pct_energy_weighted=monthly_energy_pct,
+        monthly_shading_pct_time_avg=monthly_time_pct,
     )

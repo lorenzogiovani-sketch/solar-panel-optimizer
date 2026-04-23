@@ -1,9 +1,24 @@
 from datetime import datetime
+from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import List, Optional, Dict
 
 from app.models.validators import normalize_polygons
+from app.services.decomposition import DecompositionModel
+
+
+class AtmosphereProfile(str, Enum):
+    rural = "rural"
+    urban = "urban"
+    industrial = "industrial"
+    custom = "custom"
+
+
+class SkyCondition(str, Enum):
+    clear = "clear"
+    average = "average"
+    generic = "generic"
 
 def _current_year() -> int:
     return datetime.now().year
@@ -13,6 +28,7 @@ class SunPathRequest(BaseModel):
     longitude: float = Field(..., ge=-180, le=180, description="Longitudine del sito (gradi decimali)")
     year: int = Field(default_factory=_current_year, ge=1950, le=2100, description="Anno per la simulazione")
     timezone: str = Field("UTC", description="Timezone (es. 'Europe/Rome', 'UTC')")
+    altitude: Optional[float] = Field(0.0, ge=0, description="Altitudine del sito in metri s.l.m., usata per correggere la massa d'aria atmosferica (Kasten-Young, Eq. 1.28)")
 
 class SunPathResponse(BaseModel):
     timestamps: List[str] = Field(..., description="Lista dei timestamp (ISO 8601)")
@@ -34,9 +50,57 @@ class IrradianceRequest(BaseModel):
     azimuth: float = Field(..., description="Orientamento del pannello (gradi, 180=Sud)")
     year: int = Field(default_factory=_current_year, ge=1950, le=2100, description="Anno per la simulazione")
     timezone: str = Field("UTC", description="Timezone (es. 'Europe/Rome', 'UTC')")
+    altitude: Optional[float] = Field(0.0, ge=0, description="Altitudine del sito in metri s.l.m., usata per correggere la massa d'aria atmosferica (Kasten-Young, Eq. 1.28)")
+    atmosphere_profile: Optional[AtmosphereProfile] = Field(None, description="Profilo atmosferico predefinito (rural/urban/industrial/custom). None = pipeline pvlib invariata.")
+    angstrom_beta: Optional[float] = Field(None, ge=0, le=1, description="Coefficiente di torbidezza Ångström β_A (0=limpido, 0.4=molto torbido). Usato se atmosphere_profile=custom o None con questo campo valorizzato.")
+    angstrom_alpha: Optional[float] = Field(1.3, ge=0, le=3, description="Esponente di lunghezza d'onda Ångström α (default 1.3, aerosol rurali).")
+    sky_condition: Optional[SkyCondition] = Field(
+        SkyCondition.average,
+        description="Condizione atmosferica: 'clear' (REST2/Bird), 'average' (Ineichen, default), 'generic' (scomposizione GHI→DNI/DHI se ghi_series fornito).",
+    )
+    decomposition_model: Optional[DecompositionModel] = Field(
+        DecompositionModel.erbs,
+        description="Modello di scomposizione GHI→(DNI,DHI). Attivo solo con sky_condition='generic' e ghi_series valorizzato senza dni_series/dhi_series.",
+    )
+    ghi_series: Optional[List[float]] = Field(
+        None, description="Serie oraria GHI misurata (W/m², 8760 valori). Se fornita senza dni_series/dhi_series con sky_condition='generic', attiva la scomposizione."
+    )
+    dni_series: Optional[List[float]] = Field(
+        None, description="Serie oraria DNI misurata (W/m²). Se fornita insieme a dhi_series, bypassa la scomposizione."
+    )
+    dhi_series: Optional[List[float]] = Field(
+        None, description="Serie oraria DHI misurata (W/m²). Se fornita insieme a dni_series, bypassa la scomposizione."
+    )
     roof_surfaces: Optional[List[RoofSurface]] = Field(
         None, description="Se presente, calcola irradianza pesata su più superfici del tetto. Override tilt/azimuth."
     )
+    h_bh_daily: Optional[List[float]] = Field(
+        None,
+        description=(
+            "12 valori mensili di irraggiamento diretto giornaliero medio su piano "
+            "orizzontale (kWh/m²·d), come da UNI 10349-3. Se forniti insieme a "
+            "h_dh_daily e con sky_condition='average', attiva la disaggregazione "
+            "oraria Collares-Pereira-Rabl / Gueymard (beam) + Liu-Jordan (diffuse)."
+        ),
+    )
+    h_dh_daily: Optional[List[float]] = Field(
+        None,
+        description=(
+            "12 valori mensili di irraggiamento diffuso giornaliero medio su piano "
+            "orizzontale (kWh/m²·d), come da UNI 10349-3. Vedi h_bh_daily."
+        ),
+    )
+
+    @field_validator("h_bh_daily", "h_dh_daily")
+    @classmethod
+    def _validate_monthly_daily(cls, v: Optional[List[float]]) -> Optional[List[float]]:
+        if v is None:
+            return v
+        if len(v) != 12:
+            raise ValueError("h_bh_daily / h_dh_daily devono avere esattamente 12 valori (uno per mese)")
+        if any((x is None) or (x < 0) for x in v):
+            raise ValueError("h_bh_daily / h_dh_daily non possono contenere valori negativi o nulli")
+        return v
 
 class SurfaceIrradiance(BaseModel):
     """Irradianza annua per una singola superficie del tetto."""
@@ -81,6 +145,7 @@ class DailySimulationRequest(BaseModel):
     building_azimuth: float = Field(180, description="Azimuth edificio (gradi)")
     model_rotation: float = Field(0, description="Rotazione modello (gradi)")
     model_offset_y: float = Field(0, description="Offset verticale modello importato (metri)")
+    altitude: Optional[float] = Field(0.0, ge=0, description="Altitudine del sito in metri s.l.m., usata per correggere la massa d'aria atmosferica (Kasten-Young, Eq. 1.28)")
     building: Dict = Field(..., description="Geometria edificio")
     obstacles: List[Dict] = Field(default=[], description="Ostacoli")
     panels: List[Dict] = Field(default=[], description="Posizioni pannelli [{x, y, z, width, height}]")

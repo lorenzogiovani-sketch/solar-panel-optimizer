@@ -1,11 +1,13 @@
+name: solar-optimizer-copy
 services:
   # ─── Frontend (React + Vite) ───────────────────────────────────
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    container_name: solar-frontend-copy
     ports:
-      - "5173:5173"
+      - "5174:5173"
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
@@ -14,7 +16,7 @@ services:
       - ./frontend/tailwind.config.js:/app/tailwind.config.js
       - ./frontend/postcss.config.js:/app/postcss.config.js
     environment:
-      - VITE_API_URL=http://localhost:8000
+      - VITE_API_URL=http://localhost:8001
     depends_on:
       - backend
     restart: unless-stopped
@@ -26,14 +28,15 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    container_name: solar-backend-copy
     ports:
-      - "8000:8000"
+      - "8001:8000"
     volumes:
       - ./backend/app:/app/app
       - ./data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
-      - CORS_ORIGINS=http://localhost:5173
+      - CORS_ORIGINS=http://localhost:5174
     restart: unless-stopped
     networks:
       - solar-net

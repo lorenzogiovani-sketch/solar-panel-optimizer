@@ -1,6 +1,11 @@
 /**
  * Coordinate System Utilities
  *
+ * Convention mapping:
+ *   pvlib azimuth  — 0°=N, 90°=E, 180°=S, 270°=W (clockwise from North)
+ *   Reference §1.2 — Ψ = az_pvlib − 180°; Ψ=0°=S, Ψ=−90°=E, Ψ=+90°=W (per Eq. 1.14)
+ *   Three.js scene — Y-up, −Z=N, +X=E, +Z=S; sun vector: x=cos(el)·sin(az), z=−cos(el)·cos(az)
+ *
  * Convention (Right-Handed, Y-Up):
  * - +Y: Up (vertical, elevation)
  * - -Z: North (azimuth 0°)

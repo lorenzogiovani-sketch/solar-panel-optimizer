@@ -1,18 +1,68 @@
 import pandas as pd
 import pvlib
+from typing import Literal, Union
 from app.services.thermal import calc_temp_derating
+from app.services.geometry import normalize_sun_geometry
+from app.services.atmosphere import airmass, linke_turbidity_from_angstrom, resolve_atmosphere
 from app.models.solar import (
     SunPathRequest, SunPathResponse,
     IrradianceRequest, IrradianceResponse, SurfaceIrradiance,
     DailySimulationRequest, DailySimulationResponse, HourlyDataPoint,
     EconomicsRequest, EconomicsResponse, MonthlyEconomicsData, HourlyAnalysis,
+    SkyCondition,
 )
+from app.services.clear_sky import select_clear_sky_strategy
+from app.services.decomposition import DecompositionModel, select_decomposition
+from app.services.daily_to_hourly import expand_monthly_to_yearly
 from datetime import datetime
 import calendar
 import logging
 import math
 import numpy as np
 import trimesh
+
+
+ArrayLike = Union[float, np.ndarray]
+
+
+def compute_reflected_irradiance(
+    bhi: ArrayLike,
+    dhi: ArrayLike,
+    tilt_deg: ArrayLike,
+    rho: float = 0.2,
+    F_s_th_beam: ArrayLike = 0.0,
+    F_s_rh: ArrayLike = 0.0,
+    sky_model: Literal["isotropic", "brunger_hooper"] = "isotropic",
+) -> ArrayLike:
+    """
+    Ricomposizione dell'irradianza riflessa dal suolo (Eq. 4.2 del riferimento).
+
+    Mappatura simboli riferimento → Python:
+      - ρ         → rho               albedo del suolo (default 0.2)
+      - I_bh      → bhi               irradianza diretta su piano orizzontale (W/m²)
+      - I_dh      → dhi               irradianza diffusa su piano orizzontale (W/m²)
+      - Σ         → tilt_deg          inclinazione del piano (°)
+      - F_s,th    → F_s_th_beam       frazione di volta celeste oscurata vista nel
+                                      punto illuminato dal raggio diretto
+      - F_s,rh    → F_s_rh            frazione di emisfero terrestre oscurata dal
+                                      punto di vista della superficie
+
+    Modelli:
+      - 'isotropic'      : I_r = ρ · (1-cos Σ)/2 · (I_bh + I_dh)       [= ρ·GHI·VF]
+      - 'brunger_hooper' : I_r = ρ · (1-cos Σ)/2 · [(1-F_s,th_beam)·I_bh + (1-F_s,rh)·I_dh]
+
+    Il fattore geometrico (1-cos Σ)/2 (view-factor superficie↔suolo, Eq. 2.71) è
+    mantenuto in entrambi i modelli: rappresenta la frazione di emisfero terrestre
+    intercettata dal piano inclinato, indipendente dalla schermatura locale.
+    Per F_s,th_beam = F_s,rh = 0 il modello brunger_hooper coincide con l'isotropo
+    (entro la tolleranza di discretizzazione delle griglie di patch).
+    """
+    vf = (1.0 - np.cos(np.radians(tilt_deg))) / 2.0
+    if sky_model == "brunger_hooper":
+        weighted = (1.0 - np.asarray(F_s_th_beam)) * np.asarray(bhi) + \
+                   (1.0 - np.asarray(F_s_rh)) * np.asarray(dhi)
+        return rho * vf * weighted
+    return rho * vf * (np.asarray(bhi) + np.asarray(dhi))
 
 
 def _create_location(latitude: float, longitude: float, timezone: str) -> pvlib.location.Location:
@@ -97,38 +147,135 @@ def calculate_irradiance(request: IrradianceRequest) -> IrradianceResponse:
     # 1. Creazione Location object
     location = _create_location(request.latitude, request.longitude, request.timezone)
 
-    # 2. Tentativo di usare dati TMY da PVGIS (dati meteo reali satellitari)
-    tmy_data = _get_tmy_data(request.latitude, request.longitude)
+    sky_cond_value = (request.sky_condition.value if request.sky_condition else 'average')
+    pressure = 101325.0 * math.exp(-(request.altitude or 0.0) / 8434.5)
 
-    if tmy_data is not None:
-        # TMY disponibile: usa dati meteo reali
-        # TMY ha anni diversi per mesi diversi → normalizziamo a un anno singolo
-        tmy_local = tmy_data.index.tz_convert(request.timezone) if tmy_data.index.tz else tmy_data.index.tz_localize('UTC').tz_convert(request.timezone)
-        # Riscriviamo l'anno a request.year mantenendo mese/giorno/ora
-        normalized_index = tmy_local.map(
-            lambda ts: ts.replace(year=request.year)
-        )
-        times = pd.DatetimeIndex(normalized_index)
-        # Remove duplicate timestamps from DST transitions in TMY data
-        dup_mask = times.duplicated(keep='first')
-        if dup_mask.any():
-            times = times[~dup_mask]
-            tmy_data = tmy_data.iloc[~dup_mask]
-        solpos = location.get_solarposition(times)
+    # 2. Acquisizione GHI/DNI/DHI — tre percorsi mutuamente esclusivi:
+    #    a) serie fornite dall'utente (con eventuale scomposizione)
+    #    b) dati TMY da PVGIS
+    #    c) clearsky analitico (fallback)
 
-        ghi_s = pd.Series(tmy_data['ghi'].values, index=times, name='ghi')
-        dni_s = pd.Series(tmy_data['dni'].values, index=times, name='dni')
-        dhi_s = pd.Series(tmy_data['dhi'].values, index=times, name='dhi')
-    else:
-        # Fallback: clearsky (sovrastima ~10-15%)
+    if request.ghi_series is not None:
+        # Percorso (a): serie utente
         start_date = f"{request.year}-01-01 00:00:00"
         end_date = f"{request.year}-12-31 23:59:00"
         times = pd.date_range(start=start_date, end=end_date, freq='1h', tz=request.timezone)
         solpos = location.get_solarposition(times)
-        clearsky = location.get_clearsky(times)
-        ghi_s = clearsky['ghi']
-        dni_s = clearsky['dni']
-        dhi_s = clearsky['dhi']
+        ghi_arr = np.array(request.ghi_series, dtype=float)
+
+        if request.dni_series is not None and request.dhi_series is not None:
+            # GHI + DNI + DHI tutti presenti → bypass scomposizione (caso regressione)
+            dni_arr = np.array(request.dni_series, dtype=float)
+            dhi_arr = np.array(request.dhi_series, dtype=float)
+        elif sky_cond_value == 'generic':
+            # Solo GHI con sky_condition='generic' → scomposizione attiva
+            decomp_model = request.decomposition_model or DecompositionModel.erbs
+            decomp_fn = select_decomposition(decomp_model)
+            beta_arr = (90.0 - solpos['apparent_zenith'].values[:len(ghi_arr)]).clip(min=0.0)
+            doy_arr = times.day_of_year.values[:len(ghi_arr)].astype(float)
+            dni_arr, dhi_arr = decomp_fn(ghi_arr, beta_arr, doy_arr)
+        else:
+            raise ValueError("ghi_series senza dni_series/dhi_series richiede sky_condition='generic'")
+
+        n = min(len(times), len(ghi_arr))
+        times = times[:n]
+        solpos = solpos.iloc[:n]
+        ghi_s = pd.Series(ghi_arr[:n], index=times, name='ghi')
+        dni_s = pd.Series(dni_arr[:n], index=times, name='dni')
+        dhi_s = pd.Series(dhi_arr[:n], index=times, name='dhi')
+
+    elif (
+        sky_cond_value == 'average'
+        and request.h_bh_daily is not None
+        and request.h_dh_daily is not None
+    ):
+        # Percorso (a-bis): disaggregazione daily→hourly (UNI 10349 + CPRG + Liu-Jordan).
+        # Attivo solo in 'cielo medio' quando l'utente fornisce aggregati giornalieri
+        # H_bh, H_dh su piano orizzontale. Niente TMY/clearsky in questo ramo.
+        start_date = f"{request.year}-01-01 00:00:00"
+        end_date = f"{request.year}-12-31 23:00:00"
+        times = pd.date_range(start=start_date, end=end_date, freq='1h', tz=request.timezone)
+        solpos = location.get_solarposition(times)
+
+        bhi_year, dhi_year = expand_monthly_to_yearly(
+            request.h_bh_daily, request.h_dh_daily, request.latitude, request.year,
+        )
+        n = min(len(times), len(bhi_year))
+        times = times[:n]
+        solpos = solpos.iloc[:n]
+        bhi = bhi_year[:n]
+        dhi = dhi_year[:n]
+
+        cos_z = np.cos(np.radians(solpos['apparent_zenith'].values)).clip(min=0.0)
+        ghi_arr = bhi + dhi
+        dni_arr = np.where(cos_z > 1e-3, bhi / np.maximum(cos_z, 1e-3), 0.0)
+
+        ghi_s = pd.Series(ghi_arr, index=times, name='ghi')
+        dni_s = pd.Series(dni_arr, index=times, name='dni')
+        dhi_s = pd.Series(dhi, index=times, name='dhi')
+
+    else:
+        # Percorso (b) o (c): TMY o clearsky
+        tmy_data = None
+        if sky_cond_value != 'clear':
+            tmy_data = _get_tmy_data(request.latitude, request.longitude)
+
+        if tmy_data is not None:
+            # Percorso (b): TMY disponibile
+            tmy_local = tmy_data.index.tz_convert(request.timezone) if tmy_data.index.tz else tmy_data.index.tz_localize('UTC').tz_convert(request.timezone)
+            normalized_index = tmy_local.map(lambda ts: ts.replace(year=request.year))
+            times = pd.DatetimeIndex(normalized_index)
+            dup_mask = times.duplicated(keep='first')
+            if dup_mask.any():
+                times = times[~dup_mask]
+                tmy_data = tmy_data.iloc[~dup_mask]
+            solpos = location.get_solarposition(times)
+
+            ghi_s = pd.Series(tmy_data['ghi'].values, index=times, name='ghi')
+            dni_s = pd.Series(tmy_data['dni'].values, index=times, name='dni')
+            dhi_s = pd.Series(tmy_data['dhi'].values, index=times, name='dhi')
+        else:
+            # Percorso (c): clearsky analitico
+            start_date = f"{request.year}-01-01 00:00:00"
+            end_date = f"{request.year}-12-31 23:59:00"
+            times = pd.date_range(start=start_date, end=end_date, freq='1h', tz=request.timezone)
+            solpos = location.get_solarposition(times)
+
+            has_atmosphere = (
+                request.atmosphere_profile is not None or request.angstrom_beta is not None
+            )
+
+            beta_corr_param = None
+            turbidity_param = None
+            if has_atmosphere:
+                beta_a_eff, alpha_eff = resolve_atmosphere(
+                    request.atmosphere_profile, request.angstrom_beta, request.angstrom_alpha
+                )
+                beta_corr_param = (beta_a_eff, alpha_eff)
+                airmass_rel = pvlib.atmosphere.get_relative_airmass(
+                    solpos['apparent_zenith'], model='kastenyoung1989'
+                )
+                airmass_abs = pvlib.atmosphere.get_absolute_airmass(airmass_rel, pressure=pressure)
+                turbidity_param = airmass_abs.apply(
+                    lambda am: linke_turbidity_from_angstrom(beta_a_eff, alpha_eff, float(am))
+                    if pd.notna(am) and am < 38 else 3.0
+                )
+            else:
+                beta_corr_param = (0.05, 1.3)  # default rurale per REST2
+
+            strategy = select_clear_sky_strategy(sky_cond_value)
+            cs = strategy.compute(
+                times=times,
+                latitude=request.latitude,
+                longitude=request.longitude,
+                altitude=request.altitude or 0.0,
+                beta_corr=beta_corr_param,
+                turbidity=turbidity_param,
+                pressure=pressure,
+            )
+            ghi_s = cs['ghi']
+            dni_s = cs['dni']
+            dhi_s = cs['dhi']
 
     # 3. Calcolo Irradianza POA (Plane of Array) — modello Perez
     dni_extra = pvlib.irradiance.get_extra_radiation(times)
@@ -407,6 +554,11 @@ def calculate_daily_simulation(request: DailySimulationRequest) -> DailySimulati
         if poa_val <= 0:
             continue
 
+        # Geometria solare corretta (rifrazione Bennett) e massa d'aria (Kasten-Young + quota)
+        # geo e m sono disponibili per step 3–5 (REST2, torbidezza, Solis)
+        geo = normalize_sun_geometry(float(daylight_solpos.loc[ts, "elevation"]), float(azi))
+        m = airmass(geo.beta_corr_deg, request.altitude or 0.0)
+
         # Correzione termica: temperatura cella secondo modello NOCT
         # Usa temperatura oraria TMY se disponibile, altrimenti T_AMB costante
         t_amb = float(tmy_hourly_temp.get(ts, T_AMB)) if tmy_hourly_temp is not None else T_AMB
@@ -426,12 +578,7 @@ def calculate_daily_simulation(request: DailySimulationRequest) -> DailySimulati
         # Calcolo ombreggiatura per ogni pannello
         shading_factor = 1.0  # 1.0 = nessuna ombra
         if has_panel_positions and scene_mesh is not None:
-            # Vettore sole nel sistema locale
-            az_rad = np.radians(azi)
-            el_rad = np.radians(elev)
-            sun_x = np.cos(el_rad) * np.sin(az_rad)
-            sun_y = np.sin(el_rad)
-            sun_z = -np.cos(el_rad) * np.cos(az_rad)
+            sun_x, sun_y, sun_z = geo.sun_vector  # usa beta_corr già calcolato sopra
 
             # Ruota nel sistema locale edificio
             if abs(building_rot) > 1e-6:
