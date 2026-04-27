@@ -7,6 +7,8 @@
 [![Python](https://img.shields.io/badge/Python-3.11-green.svg)](backend/)
 [![React](https://img.shields.io/badge/React-18-blue.svg)](frontend/)
 
+https://github.com/user-attachments/assets/f5166996-566a-497b-9f9a-b44e1e51fa26
+
 ---
 
 ## Panoramica
