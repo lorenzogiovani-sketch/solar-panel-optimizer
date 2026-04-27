@@ -67,10 +67,10 @@ docs/CRITICAL_ISSUES.md
 docs/CRITICAL_IUSSES_2.md
 docs/PVGIS_VALIDATION.md
 docs/Mutamento.md
-docs/PIANO_OPERATIVO.MD
 docs/Riferimento.md
 docs/VERIFICA_DOCKER.md
 backend/scripts/
+Fase_1_Prompts.md
 
 # ─── GitHub templates ───────────────────────────
 .github/
