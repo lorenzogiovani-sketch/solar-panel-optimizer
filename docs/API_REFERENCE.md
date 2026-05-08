@@ -56,7 +56,7 @@ Calcoli astronomici, simulazione solare e analisi economica.
 
 ### `POST /api/v1/solar/sun-path`
 
-Genera le posizioni solari orarie per un anno intero, filtrate per ore diurne (elevazione > 0).
+Genera le posizioni solari orarie per un anno intero, filtrate per ore diurne (elevazione > 0). L'elevazione restituita è quella **apparente**, corretta per la rifrazione atmosferica con la formula di Saemundsson/Bennett (vedi `PHYSICS.md` §1.2).
 
 **Request Body (`SunPathRequest`):**
 
@@ -65,9 +65,18 @@ Genera le posizioni solari orarie per un anno intero, filtrate per ore diurne (e
   "latitude": 41.9028,
   "longitude": 12.4964,
   "timezone": "Europe/Rome",
-  "year": 2024
+  "year": 2024,
+  "altitude": 21.0
 }
 ```
+
+| Campo | Tipo | Default | Vincoli | Descrizione |
+| --- | --- | --- | --- | --- |
+| `latitude` | float | — | $-90 \leq \text{lat} \leq 90$ | Latitudine del sito |
+| `longitude` | float | — | $-180 \leq \text{lon} \leq 180$ | Longitudine del sito |
+| `year` | int | anno corrente | $1950 \leq y \leq 2100$ | Anno della simulazione |
+| `timezone` | string | `"UTC"` | — | Timezone IANA (es. `Europe/Rome`) |
+| `altitude` | float? | `0.0` | $\geq 0$ | Altitudine s.l.m. (m). Usata per la correzione altitudinale di Kasten-Young (Eq. 1.28) |
 
 **Response (`SunPathResponse`, 200 OK):**
 
@@ -85,7 +94,7 @@ Genera le posizioni solari orarie per un anno intero, filtrate per ore diurne (e
 
 ### `POST /api/v1/solar/irradiance`
 
-Calcola l'irradianza annuale su piano inclinato (POA) utilizzando dati TMY da PVGIS (con fallback a modello ClearSky). Trasposizione con modello di Perez.
+Calcola l'irradianza annuale su piano inclinato (POA) utilizzando dati TMY da PVGIS (con fallback ai modelli clear-sky `IneichenStrategy` o `REST2Strategy`). Trasposizione anisotropa con modello di Perez. Supporta inoltre **decomposizione GHI → (DNI, DHI)** quando `sky_condition='generic'` con `ghi_series` valorizzata, e **disaggregazione daily → hourly** Collares-Pereira-Rabl + Liu-Jordan dai 12 valori UNI 10349-3 di $H_{bh}/H_{dh}$.
 
 **Request Body (`IrradianceRequest`):**
 
@@ -96,9 +105,44 @@ Calcola l'irradianza annuale su piano inclinato (POA) utilizzando dati TMY da PV
   "timezone": "Europe/Rome",
   "year": 2024,
   "tilt": 30.0,
-  "azimuth": 180.0
+  "azimuth": 180.0,
+  "altitude": 21.0,
+  "atmosphere_profile": "rural",
+  "angstrom_beta": null,
+  "angstrom_alpha": 1.3,
+  "sky_condition": "average",
+  "decomposition_model": "erbs",
+  "ghi_series": null,
+  "dni_series": null,
+  "dhi_series": null,
+  "roof_surfaces": null,
+  "h_bh_daily": null,
+  "h_dh_daily": null
 }
 ```
+
+| Campo | Tipo | Default | Vincoli | Descrizione |
+| --- | --- | --- | --- | --- |
+| `latitude` | float | — | $\pm 90$ | Latitudine del sito |
+| `longitude` | float | — | $\pm 180$ | Longitudine del sito |
+| `tilt` | float | — | — | Inclinazione del pannello (°, 0 = orizzontale) |
+| `azimuth` | float | — | — | Orientamento pannello (°, conv. pvlib: 180 = Sud) |
+| `year` | int | anno corrente | $1950..2100$ | Anno simulazione |
+| `timezone` | string | `"UTC"` | — | Timezone IANA |
+| `altitude` | float? | `0.0` | $\geq 0$ | Altitudine s.l.m. (m), Eq. 1.28 |
+| `atmosphere_profile` | enum? | `null` | `rural` / `urban` / `industrial` / `custom` | Profilo aerosol predefinito (`null` = pipeline pvlib invariata) |
+| `angstrom_beta` | float? | `null` | $0 \leq \beta_A \leq 1$ | Coefficiente di torbidezza Ångström $\beta_A$ |
+| `angstrom_alpha` | float? | `1.3` | $0 \leq \alpha \leq 3$ | Esponente di lunghezza d'onda Ångström |
+| `sky_condition` | enum? | `"average"` | `clear` / `average` / `generic` | Strategia clear-sky: `clear` → REST2/Bird, `average` → Ineichen, `generic` → scomposizione |
+| `decomposition_model` | enum? | `"erbs"` | `erbs` / `skartveit_olseth` / `ruiz_arias` | Modello GHI → DNI/DHI (attivo solo con `sky_condition='generic'` + `ghi_series`) |
+| `ghi_series` | float[]? | `null` | 8760 valori | Serie GHI misurata (W/m²) |
+| `dni_series` | float[]? | `null` | — | Serie DNI misurata (bypassa decomposizione se con `dhi_series`) |
+| `dhi_series` | float[]? | `null` | — | Serie DHI misurata |
+| `roof_surfaces` | RoofSurface[]? | `null` | — | Calcolo pesato su più falde, override `tilt`/`azimuth` |
+| `h_bh_daily` | float[]? | `null` | esattamente 12 | Irraggiamento mensile diretto orizzontale (kWh/m²·d), UNI 10349-3 |
+| `h_dh_daily` | float[]? | `null` | esattamente 12 | Irraggiamento mensile diffuso orizzontale (kWh/m²·d) |
+
+`RoofSurface`: `{ tilt, azimuth, weight (0..1), face }`.
 
 **Response (`IrradianceResponse`, 200 OK):**
 
@@ -112,9 +156,12 @@ Calcola l'irradianza annuale su piano inclinato (POA) utilizzando dati TMY da PV
     "January": 115.4,
     "February": 130.8
   },
-  "annual_total": 1850.2
+  "annual_total": 1850.2,
+  "per_surface": null
 }
 ```
+
+`per_surface` è valorizzato solo se `roof_surfaces` è fornito: array di `{ face, tilt, azimuth, annual_total }`.
 
 ### `POST /api/v1/solar/shadows`
 
@@ -127,6 +174,7 @@ Calcola la heatmap di ombreggiamento sul tetto tramite ray-casting. Supporta ana
   "latitude": 41.9028,
   "longitude": 12.4964,
   "timezone": "Europe/Rome",
+  "year": 2024,
   "azimuth": 0,
   "model_rotation": 0,
   "grid_resolution": 50,
@@ -138,20 +186,58 @@ Calcola la heatmap di ombreggiamento sul tetto tramite ray-casting. Supporta ana
   },
   "obstacles": [
     {
-      "type": "box",
-      "dimensions": [1, 2, 1],
-      "position": [2, 6, 2]
+      "type": "tree",
+      "treeShape": "cone",
+      "tree_category": null,
+      "foliage_type": "deciduous",
+      "monthly_transmissivity_override": null,
+      "position": [2, 0, 4],
+      "trunk_height": 1.8,
+      "crown_height": 3.5,
+      "crown_radius": 1.5
     }
   ],
   "installation_polygons": null,
   "installation_plane_y": null,
   "model_offset_y": 0,
   "analysis_mode": "annual",
+  "sky_model": "isotropic",
+  "diffuse_fraction_kd": 0.35,
   "analysis_month": null,
   "analysis_day": null,
   "analysis_hour": null
 }
 ```
+
+| Campo | Tipo | Default | Vincoli | Descrizione |
+| --- | --- | --- | --- | --- |
+| `building` | object | — | — | Geometria edificio (vertices/faces o parametrica) |
+| `obstacles` | object[] | `[]` | — | Lista ostacoli (gli alberi seguono lo schema `TreeObstacle`) |
+| `latitude`/`longitude` | float | — | $\pm 90 / \pm 180$ | Coordinate sito |
+| `year` | int | anno corrente | $1950..2100$ | Anno simulazione |
+| `grid_resolution` | int | `50` | $10..500$ | Risoluzione griglia $N \times N$ |
+| `timezone` | string | `"UTC"` | — | Timezone IANA |
+| `azimuth` | float | `180` | — | Azimuth edificio (°) |
+| `model_rotation` | float | `0` | — | Rotazione manuale aggiuntiva (°) |
+| `model_offset_y` | float | `0` | — | Offset verticale modello importato (m) |
+| `installation_polygons` | obj[][]? | `null` | — | Lista di poligoni `[{x,y,z}]` |
+| `installation_plane_y` | float? | `null` | — | Quota Y piano installazione (override) |
+| `analysis_mode` | enum | `"annual"` | `annual` / `monthly` / `instant` | Modalità analisi |
+| `sky_model` | enum | `"isotropic"` | `isotropic` / `brunger_hooper` | Modello diffusa: SVF classico oppure TCCD anisotropo (Eq. 4.45) |
+| `diffuse_fraction_kd` | float | `0.35` | $0..1$ | $K_d = H_{dh}/H_{gh}$ per Brunger-Hooper |
+| `analysis_month` | int? | `null` | $1..12$ | Mese (per `monthly`/`instant`) |
+| `analysis_day` | int? | `null` | $1..31$ | Giorno (per `instant`) |
+| `analysis_hour` | float? | `null` | $0..23.99$ | Ora decimale (per `instant`) |
+
+**Schema albero (`TreeObstacle`):**
+
+| Campo | Tipo | Valori |
+| --- | --- | --- |
+| `type` | string | `"tree"` |
+| `treeShape` | string? | `cone` / `sphere` / `umbrella` / `columnar` |
+| `tree_category` | string? | `truncated_cone` / `ellipsoidal` (auto da `treeShape` se `null`) |
+| `foliage_type` | string | `deciduous` (default) / `evergreen` |
+| `monthly_transmissivity_override` | float[]? | 12 valori in $[0,1]$, sovrascrivono Tab. 6.2 |
 
 **Response (`ShadowResponse`, 200 OK):**
 
@@ -173,7 +259,13 @@ Calcola la heatmap di ombreggiamento sul tetto tramite ray-casting. Supporta ana
   "statistics": {
     "free_area_pct": 82.5
   },
-  "computation_time_s": 3.2
+  "computation_time_s": 3.2,
+  "annual_shading_pct": 15.4,
+  "annual_shading_pct_energy_weighted": 15.4,
+  "annual_shading_pct_time_avg": 13.1,
+  "monthly_shading_pct": { "1": 22.0, "6": 8.4 },
+  "monthly_shading_pct_energy_weighted": { "1": 22.0, "6": 8.4 },
+  "monthly_shading_pct_time_avg": { "1": 19.5, "6": 7.1 }
 }
 ```
 
@@ -182,9 +274,7 @@ Calcola la heatmap di ombreggiamento sul tetto tramite ray-casting. Supporta ana
 - `grid_resolution`: 30 (bassa), 50 (media), 100 (alta) punti per lato
 - `analysis_mode`: `"annual"` (12 giorni campione), `"monthly"` (singolo mese), `"instant"` (singolo timestamp)
 - Valori nella griglia: 0.0 = libero, 1.0 = completamente ombreggiato, -1.0 = fuori dal poligono di installazione
-- `installation_polygons`: Array di poligoni `[{x, y, z}]` che definiscono le zone di installazione
-- `installation_plane_y`: Quota Y del piano di installazione (per modelli importati)
-- `model_offset_y`: Offset verticale del modello importato (metri)
+- `annual_shading_pct` è il valore primario (energy-weighted secondo UNI/TS 11300-1, Eq. 4.46); `*_time_avg` è la media aritmetica temporale legacy
 
 ### `POST /api/v1/solar/daily-simulation`
 
@@ -201,9 +291,11 @@ Simula la produzione energetica per un giorno specifico con step di 30 minuti. I
   "day": 21,
   "tilt": 30.0,
   "panel_azimuth": 180.0,
+  "panel_groups": null,
   "building_azimuth": 0.0,
   "model_rotation": 0.0,
   "model_offset_y": 0.0,
+  "altitude": 21.0,
   "building": {
     "width": 12,
     "depth": 10,
@@ -223,6 +315,11 @@ Simula la produzione energetica per un giorno specifico con step di 30 minuti. I
   "installation_polygons": []
 }
 ```
+
+**Campi aggiuntivi rilevanti:**
+
+- `altitude` (float, default `0.0`, $\geq 0$) — altitudine s.l.m. (m), correzione massa d'aria
+- `panel_groups` (array opzionale di `{ tilt, azimuth, count }`) — se presente, calcola POA pesata per gruppi di pannelli su falde diverse, ignorando `tilt`/`panel_azimuth`
 
 **Response (`DailySimulationResponse`, 200 OK):**
 

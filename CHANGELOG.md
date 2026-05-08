@@ -2,6 +2,23 @@
 
 Tutte le modifiche rilevanti a questo progetto sono documentate in questo file.
 
+## [1.1.0] - 2026-05-08
+
+### Motore Solare e Ombre
+
+- Refactor del motore solare/ombre con modelli atmosferici espliciti
+- Geometria solare normalizzata con correzione rifrattiva (Saemundsson/Bennett, Eq. 1.13–1.14)
+- Massa d'aria Kasten-Young con correzione altitudinale (Eq. 1.27–1.28)
+- Decomposizione GHI → DNI/DHI con tre modelli intercambiabili (Erbs, Skartveit-Olseth, Ruiz-Arias)
+- Trasposizione anisotropica con modello di Perez/Hay-Davies, SVF e horizon brightening (Brunger-Hooper TCCD, Eq. 4.45)
+- Modello clear-sky Ineichen-Perez (default) con fallback REST2/Bird per cielo sereno
+- Trasmissività vegetazione con LAI stagionale da Tab. 6.2 del riferimento (deciduous/evergreen)
+- Disaggregazione daily → hourly per profili sintetici UNI 10349-3 (Collares-Pereira-Rabl + Liu-Jordan)
+- Aggregazione shading energy-weighted (Eq. 4.46, UNI/TS 11300-1) come metrica primaria, media temporale come legacy
+- Modelli Pydantic estesi per `solar.py` (atmosfera, Ångström, decomposizione, profili daily) e `shadow.py` (sky_model, K_d, schema TreeObstacle)
+- Nuovi moduli backend: `atmosphere.py`, `clear_sky.py`, `decomposition.py`, `daily_to_hourly.py`, `geometry.py`, `sky_diffuse.py`, `vegetation.py`
+- Test estesi: `test_solar.py` ampliato e nuovo `test_shadow.py`
+
 ## [1.0.0] - 2026-04-07
 
 Rilascio pubblico iniziale.

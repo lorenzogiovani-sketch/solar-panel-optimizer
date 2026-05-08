@@ -101,13 +101,16 @@ Il server applicativo, scritto in **Python 3.11** tramite **FastAPI**, riceve JS
 
 Livello di interfaccia esterno. Definizione delle route REST, documentate in Swagger UI (`/docs`). Raccoglie i payload HTTP e demanda ai Service la logica complessa.
 
-5 router registrati in `main.py`:
+8 router registrati in `main.py`:
 
-- `/api/v1/solar` — Posizione solare, irradianza, ombre, simulazione giornaliera
+- `/api/v1/solar` — Posizione solare, irradianza, ombre, simulazione giornaliera, analisi economica
 - `/api/v1/building` — Upload e processamento mesh 3D
-- `/api/v1/optimize` — Esecuzione ottimizzazione (asincrona con polling)
+- `/api/v1/optimize` — Esecuzione ottimizzazione Seed-and-Grow (asincrona con polling)
+- `/api/v1/annual-surface` — Superficie annuale di potenza 3D (asincrona con polling)
 - `/api/v1/panels` — CRUD catalogo pannelli + confronto
-- `/api/v1/export` — Generazione PDF e CSV
+- `/api/v1/inverters` — CRUD catalogo inverter
+- `/api/v1/stringing` — Dimensionamento stringhe (auto/manuale)
+- `/api/v1/export` — Generazione PDF e CSV (riepilogativo + orario)
 
 #### B. Data Models (`backend/app/models/`)
 
@@ -120,13 +123,67 @@ Strato di validazione forte usando oggetti **Pydantic v2**. Assicura che il JSON
 
 #### C. Business Services (`backend/app/services/`)
 
-Il "cervello" del sistema:
+Il "cervello" del sistema. Il dominio solare/ombre è suddiviso in moduli specializzati che alimentano i due service di alto livello (`solar_service` e `shadow_service`):
 
-- **`solar_service.py`:** Astrazione di `pvlib`. Calcola posizioni solari annuali, irradianza POA con modello di Perez, simulazione giornaliera con modello termico NOCT. Supporta dati TMY da PVGIS con caching in memoria.
-- **`shadow_service.py`:** Costruisce scene 3D con `trimesh`. Implementa ray-casting a due passaggi (opaco + chiome con trasmissivita), Sky View Factor emisferico, composizione 65/35 diretto/diffuso.
-- **`optimization_service.py`:** Algoritmo **Seed-and-Grow** greedy spaziale. Espansione BFS da punti ad alta irradianza con coda a priorita, vicini Von Neumann, doppio run Portrait/Landscape con selezione automatica orientamento.
-- **`building_service.py`:** Processamento mesh 3D con `trimesh`. Conversione assi Z-up a Y-up, centratura, generazione dict con vertices/faces.
-- **`export_service.py`:** Generazione report PDF (ReportLab) e CSV con dati di produzione mensile.
+**Moduli del motore solare/atmosferico:**
+
+- **`geometry.py`** — Normalizzazione della posizione solare pvlib alla convenzione del riferimento (§1.2.1, Eq. 1.13–1.14): correzione rifrattiva di Saemundsson/Bennett, doppio azimut ($\gamma_s$ pvlib + $\Psi$ riferimento), versore solare $\hat{s}$ in coordinate Y-up.
+- **`atmosphere.py`** — Massa d'aria di Kasten-Young (Eq. 1.27) con correzione altitudinale tramite scala barometrica isoterma 8434.5 m (Eq. 1.28). Profili aerosol predefiniti (rural/urban/industrial) e derivazione torbidezza di Linke da coefficienti di Ångström.
+- **`clear_sky.py`** — Modelli clear-sky con strategy pattern: `IneichenStrategy` (Ineichen-Perez 2002, default) e `REST2Strategy` (Bird/REST2, attivo con `sky_condition='clear'`).
+- **`decomposition.py`** — Decomposizione GHI → (DNI, DHI) con tre modelli intercambiabili: Erbs (1982), Skartveit-Olseth (1987), Ruiz-Arias (2010, sigmoidale).
+- **`daily_to_hourly.py`** — Disaggregazione di profili sintetici da UNI 10349-3 (12 valori mensili medi giornalieri) in 8760 ore: Collares-Pereira & Rabl (1979) per la beam, Liu & Jordan (1960) per la diffuse, espansione tramite giorno rappresentativo di Klein (1977).
+- **`sky_diffuse.py`** — Modello di radianza diffusa anisotropo TCCD di Brunger-Hooper (Eq. 4.45). Griglia di patch celeste/terrestre (5°×10° → 648 patch per emisfero), calcolo SVF anisotropo $F_{s,d}$ e fattori di ostruzione $F_{s,th}$/$F_{s,rh}$ (Eq. 4.2).
+- **`vegetation.py`** — Trasmissività mensile della chioma (Tab. 6.2 riferimento, §6.8.3). Mapping forme UI → famiglie canoniche (troncoconica, ellissoidale), curve stagionali deciduous/evergreen, override custom 12 valori.
+
+**Service di alto livello:**
+
+- **`solar_service.py`** — Posizioni solari annuali (filtrate per $\beta_{\mathrm{corr}} > 0$), pipeline irradianza POA (TMY PVGIS con cache → eventuale decomposizione → trasposizione anisotropa Perez/Hay-Davies), simulazione giornaliera con modello termico NOCT, analisi economica (autoconsumo + payback).
+- **`shadow_service.py`** — Costruisce scene 3D con `trimesh`. Composizione di tre contributi: ray-casting diretto (con $\hat{s}$ corretto Bennett), riduzione SVF/anisotropa sulla diffusa (`sky_diffuse`), attenuazione vegetazione (`vegetation`). Aggregazione energy-weighted (Eq. 4.46) e media temporale.
+- **`optimization_service.py`** — Algoritmo **Seed-and-Grow** greedy spaziale: espansione BFS con coda a priorità, vicini Von Neumann, doppio run Portrait/Landscape con selezione automatica orientamento.
+- **`annual_surface_service.py`** — Superficie 3D di potenza integrata sull'anno, async polling.
+- **`stringing_service.py`** — Dimensionamento stringhe serie/parallelo con verifica MPPT, Voc/Isc a temperatura, rapporto DC/AC.
+- **`thermal.py`** — Modello termico NOCT.
+- **`building_service.py`** — Processamento mesh 3D, conversione assi Z-up → Y-up.
+- **`export_service.py`** — Generazione report PDF (ReportLab) e CSV.
+
+**Flusso di calcolo irradianza:**
+
+```mermaid
+sequenceDiagram
+    participant API as solar router
+    participant Solar as solar_service
+    participant Geom as geometry
+    participant Atmo as atmosphere
+    participant Decomp as decomposition
+    participant Clear as clear_sky
+    participant Daily as daily_to_hourly
+    participant Sky as sky_diffuse
+
+    API->>Solar: IrradianceRequest
+    Solar->>Geom: normalize_sun_geometry(β, γ_s)
+    Geom-->>Solar: β_corr, Ψ, ŝ, θ_z
+    Solar->>Atmo: airmass(β_corr, altitude)
+    Atmo-->>Solar: m
+    alt TMY PVGIS disponibile
+        Solar->>Solar: GHI/DNI/DHI da TMY (cache)
+    else sky_condition = generic + ghi_series
+        Solar->>Decomp: decompose(ghi, β_corr, doy)
+        Decomp-->>Solar: DNI, DHI
+    else sky_condition = clear
+        Solar->>Clear: REST2Strategy.compute()
+        Clear-->>Solar: GHI/DNI/DHI
+    else sky_condition = average
+        Solar->>Clear: IneichenStrategy.compute()
+        Clear-->>Solar: GHI/DNI/DHI
+    end
+    opt h_bh_daily / h_dh_daily
+        Solar->>Daily: expand_monthly_to_yearly()
+        Daily-->>Solar: 8760 BHI/DHI
+    end
+    Solar->>Sky: trasposizione POA (Perez + diffusa anisotropa)
+    Sky-->>Solar: E_b + E_d + E_r
+    Solar-->>API: IrradianceResponse
+```
 
 #### D. Persistenza (`backend/app/db.py`)
 

@@ -200,6 +200,10 @@ solar-optimizer/
 
 - **3 modalita di analisi ombre:** Annuale, mensile, istantanea
 - **2 livelli di risoluzione heatmap:** 50x50, 100x100
+- **Motore atmosferico esplicito:** Massa d'aria Kasten-Young con correzione altitudinale, profili aerosol (rural/urban/industrial), modelli clear-sky Ineichen-Perez e REST2/Bird, decomposizione GHI → DNI/DHI (Erbs / Skartveit-Olseth / Ruiz-Arias), disaggregazione daily → hourly da UNI 10349-3
+- **Geometria solare normalizzata:** Correzione rifrattiva Saemundsson/Bennett su tutti i downstream
+- **Trasposizione POA anisotropa:** Modello di Perez con SVF e horizon brightening, opzione Brunger-Hooper TCCD
+- **Vegetazione fisica:** Trasmissività mensile della chioma da Tab. 6.2 normativa, deciduous/evergreen + override custom
 - **Simulazione giornaliera:** Profilo orario con curva ClearSky vs effettiva, playback animato
 - **Modello termico NOCT:** De-rating potenza basato su temperatura cella
 

@@ -133,11 +133,17 @@ async def test_sun_path_rome(async_client):
 
 #### Test Disponibili
 
-- `tests/test_solar.py` — Test endpoint solari (sun path, irradianza, daily simulation)
+- `tests/test_solar.py` — Test endpoint solari + nuovi moduli del motore atmosferico (geometry, atmosphere, clear_sky, decomposition, daily_to_hourly, sky_diffuse)
+- `tests/test_shadow.py` — Test del motore ombre composito: ray-casting diretto, SVF/anisotropa, vegetazione mensile
 - `tests/test_optimization.py` — Test algoritmo Seed-and-Grow
-- `tests/test_functional.py` — Test funzionali end-to-end
+- `tests/test_panels.py` — CRUD pannelli + confronto
+- `tests/test_stringing.py` — Dimensionamento stringhe e verifiche MPPT
+- `tests/test_building.py` — Upload mesh OBJ/STL
+- `tests/test_annual_surface.py` — Superficie annuale di potenza 3D (async polling)
+- `tests/test_export.py` — Generazione PDF/CSV
+- `tests/test_functional_scenarios.py` — Test funzionali end-to-end multi-service
 
-**Regola:** Se viene modificato un calcolo in un service, aggiungere almeno un test corrispondente.
+**Regola:** Se viene modificato un calcolo in un service, aggiungere almeno un test corrispondente. Per i moduli del motore atmosferico (`geometry`, `atmosphere`, `clear_sky`, `decomposition`, `daily_to_hourly`, `sky_diffuse`, `vegetation`) preferire test puri sulla funzione esposta (assenza di stato globale) prima dei test di integrazione via endpoint.
 
 ### 2.2 Frontend
 
